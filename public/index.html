@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>APIMart 创作控制台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">GI</span>
+        <div>
+          <h1>APIMart 创作控制台</h1>
+          <p>生成图片与视频，轮询任务状态，管理本地生成记录。</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="view-tabs" aria-label="页面视图">
+          <button id="generatorTab" class="view-tab active" type="button">生成</button>
+          <button id="historyTab" class="view-tab" type="button">历史管理</button>
+          <button id="videoTab" class="view-tab" type="button">视频</button>
+        </div>
+        <a class="key-link" href="https://apimart.ai/keys" target="_blank" rel="noreferrer">API Key</a>
+      </div>
+    </header>
+
+    <main id="generatorView" class="workspace">
+      <section class="composer" aria-label="生成参数">
+        <form id="generateForm">
+          <div class="field">
+            <label for="apiKey">APIMart API Key</label>
+            <div class="secret-row">
+              <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." required />
+              <button id="toggleKey" class="ghost-button" type="button">显示</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="prompt">Prompt</label>
+            <textarea id="prompt" rows="7" required placeholder="一只橘猫坐在窗台上看夕阳，水彩画风格"></textarea>
+            <button id="promptHelperOpen" class="ghost-button prompt-helper-trigger" type="button">提示词生成</button>
+          </div>
+
+          <div class="inline-grid">
+            <div class="field">
+              <label for="size">比例</label>
+              <select id="size"></select>
+            </div>
+            <div class="field">
+              <label for="resolution">分辨率</label>
+              <select id="resolution">
+                <option value="1k">1K</option>
+                <option value="2k">2K</option>
+                <option value="4k">4K</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="count">张数</label>
+              <input id="count" type="number" value="1" min="1" max="1" inputmode="numeric" />
+            </div>
+          </div>
+
+          <div class="field switch-row">
+            <label for="officialFallback">官方渠道兜底</label>
+            <input id="officialFallback" type="checkbox" />
+          </div>
+
+          <div class="field">
+            <label for="imageUrls">参考图 URL</label>
+            <textarea id="imageUrls" rows="3" placeholder="每行一个公网图片 URL，最多 16 张"></textarea>
+          </div>
+
+          <div class="field">
+            <label for="imageFiles">上传参考图</label>
+            <input id="imageFiles" type="file" accept="image/*" multiple />
+            <div id="fileList" class="file-list" aria-live="polite"></div>
+          </div>
+
+          <div class="pixel-readout">
+            <strong id="pixelSize">2048 x 1152</strong>
+            <span id="modeLabel">文生图</span>
+          </div>
+
+          <button id="submitButton" class="primary-button" type="submit">提交生成任务</button>
+        </form>
+      </section>
+
+      <section class="result-panel" aria-label="任务结果">
+        <div class="status-strip">
+          <div>
+            <span class="eyebrow">当前任务</span>
+            <strong id="taskTitle">尚未提交</strong>
+          </div>
+          <span id="statusPill" class="status-pill idle">Idle</span>
+        </div>
+
+        <div class="manual-query">
+          <input id="taskIdInput" type="text" placeholder="task_..." aria-label="task_id" />
+          <button id="queryButton" class="ghost-button" type="button">查询任务</button>
+          <span id="pollCountdown" class="poll-countdown">未轮询</span>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-track">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <span id="progressText">等待任务</span>
+        </div>
+
+        <div id="imageStage" class="image-stage">
+          <span>生成完成后图片会显示在这里</span>
+        </div>
+
+        <div class="meta-grid">
+          <div>
+            <span>耗时</span>
+            <strong id="actualTime">-</strong>
+          </div>
+          <div>
+            <span>费用</span>
+            <strong id="cost">-</strong>
+          </div>
+          <div>
+            <span>有效期</span>
+            <strong id="expiresAt">-</strong>
+          </div>
+        </div>
+
+        <div class="response-box">
+          <div class="response-head">
+            <strong>响应 JSON</strong>
+            <button id="copyJson" class="ghost-button" type="button">复制</button>
+          </div>
+          <pre id="responseJson">{}</pre>
+        </div>
+      </section>
+    </main>
+
+    <main id="historyView" class="history-view" hidden>
+      <section class="history-toolbar" aria-label="历史管理工具栏">
+        <div>
+          <span class="eyebrow">本地历史</span>
+          <h2>生成图片管理</h2>
+        </div>
+        <div class="history-actions">
+          <input id="historySearch" type="search" placeholder="搜索 prompt 或 task_id" aria-label="搜索历史" />
+          <button id="clearHistory" class="ghost-button danger-button" type="button">清空历史</button>
+        </div>
+      </section>
+
+      <section class="history-stats" aria-label="历史统计">
+        <div>
+          <span>记录</span>
+          <strong id="historyCount">0</strong>
+        </div>
+        <div>
+          <span>图片</span>
+          <strong id="historyImageCount">0</strong>
+        </div>
+        <div>
+          <span>总费用</span>
+          <strong id="historyCost">-</strong>
+        </div>
+      </section>
+
+      <section id="historyEmpty" class="history-empty">
+        <strong>还没有历史图片</strong>
+        <span>生成完成或手动查询到 completed 任务后，会自动保存到这里。</span>
+      </section>
+
+      <section id="historyGrid" class="history-grid" aria-live="polite"></section>
+    </main>
+
+    <main id="videoView" class="video-view" hidden>
+      <section class="video-panel" aria-label="Seedance 2.0 视频生成">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">Seedance 2.0</span>
+            <h2>视频生成</h2>
+          </div>
+          <span id="videoStatusPill" class="status-pill idle">Idle</span>
+        </div>
+
+        <form id="videoForm" class="video-form">
+          <div class="field">
+            <label for="videoApiKey">APIMart API Key</label>
+            <input id="videoApiKey" type="password" autocomplete="off" placeholder="sk-..." required />
+          </div>
+
+          <div class="field">
+            <label for="videoPrompt">Prompt</label>
+            <textarea
+              id="videoPrompt"
+              rows="5"
+              placeholder="让人物在城市街道自然行走，镜头缓慢推进，电影感光影"
+            ></textarea>
+          </div>
+
+          <div class="video-options">
+            <div class="field">
+              <label for="videoModel">模型</label>
+              <select id="videoModel">
+                <option value="doubao-seedance-2.0">Seedance 2.0</option>
+                <option value="doubao-seedance-2.0-fast">Seedance 2.0 Fast</option>
+                <option value="doubao-seedance-2.0-face">Seedance 2.0 Face</option>
+                <option value="doubao-seedance-2.0-fast-face">Seedance 2.0 Fast Face</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="videoSize">比例</label>
+              <select id="videoSize">
+                <option value="16:9">16:9 横屏</option>
+                <option value="9:16">9:16 竖屏</option>
+                <option value="1:1">1:1 正方</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+                <option value="21:9">21:9 超宽</option>
+                <option value="adaptive">adaptive 自适应</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="videoResolution">分辨率</label>
+              <select id="videoResolution">
+                <option value="480p">480p</option>
+                <option value="720p" selected>720p</option>
+                <option value="1080p">1080p</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="videoDuration">时长</label>
+              <input id="videoDuration" type="number" value="5" min="5" max="15" inputmode="numeric" />
+            </div>
+            <div class="field">
+              <label for="videoSeed">Seed</label>
+              <input id="videoSeed" type="number" placeholder="可选" inputmode="numeric" />
+            </div>
+          </div>
+
+          <div class="video-switches">
+            <label><input id="videoGenerateAudio" type="checkbox" /> 生成音频</label>
+            <label><input id="videoReturnLastFrame" type="checkbox" /> 返回末帧</label>
+            <label><input id="videoWebSearch" type="checkbox" /> Web Search</label>
+          </div>
+
+          <div class="video-reference-grid">
+            <div class="field">
+              <label for="videoImageUrls">参考图 / asset:// URL</label>
+              <textarea id="videoImageUrls" rows="4" placeholder="每行一个 URL，可填 asset://asset_xxx"></textarea>
+            </div>
+            <div class="field">
+              <label for="videoFirstFrame">首帧 URL</label>
+              <input id="videoFirstFrame" type="url" placeholder="https://..." />
+            </div>
+            <div class="field">
+              <label for="videoLastFrame">尾帧 URL</label>
+              <input id="videoLastFrame" type="url" placeholder="https://..." />
+            </div>
+            <div class="field">
+              <label for="videoUrls">参考视频 URL</label>
+              <textarea id="videoUrls" rows="3" placeholder="每行一个 mp4/mov URL"></textarea>
+            </div>
+            <div class="field">
+              <label for="videoAudioUrls">参考音频 URL</label>
+              <textarea id="videoAudioUrls" rows="3" placeholder="每行一个 mp3/wav URL"></textarea>
+            </div>
+          </div>
+
+          <div class="manual-query video-query-row">
+            <input id="videoTaskIdInput" type="text" placeholder="task_..." aria-label="视频 task_id" />
+            <button id="videoQueryButton" class="ghost-button" type="button">查询视频任务</button>
+            <span id="videoPollCountdown" class="poll-countdown">未轮询</span>
+          </div>
+
+          <button id="videoSubmitButton" class="primary-button" type="submit">提交视频任务</button>
+        </form>
+
+        <div class="video-result-column">
+          <div class="progress-wrap">
+            <div class="progress-track">
+              <div id="videoProgressBar" class="progress-bar"></div>
+            </div>
+            <span id="videoProgressText">等待任务</span>
+          </div>
+
+          <div id="videoStage" class="video-stage">
+            <span>生成完成后视频会显示在这里</span>
+          </div>
+
+          <div class="response-box">
+            <div class="response-head">
+              <strong>视频响应 JSON</strong>
+              <button id="copyVideoJson" class="ghost-button" type="button">复制</button>
+            </div>
+            <pre id="videoResponseJson">{}</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="previewModal" class="preview-modal" hidden>
+      <div class="preview-toolbar">
+        <button id="previewPrev" class="preview-icon-button" type="button" aria-label="上一张">‹</button>
+        <div class="preview-title">
+          <strong id="previewTitle">图片预览</strong>
+          <span id="previewCounter">1 / 1</span>
+        </div>
+        <button id="previewNext" class="preview-icon-button" type="button" aria-label="下一张">›</button>
+        <a id="previewOpen" class="ghost-button" href="#" target="_blank" rel="noreferrer">打开原图</a>
+        <button id="previewClose" class="ghost-button" type="button">关闭</button>
+      </div>
+      <div id="previewStage" class="preview-stage">
+        <img id="previewImage" alt="放大预览" />
+      </div>
+    </div>
+
+    <div id="promptHelperModal" class="prompt-helper-modal" hidden>
+      <div class="prompt-helper-dialog" role="dialog" aria-modal="true" aria-labelledby="promptHelperTitle">
+        <div class="prompt-helper-head">
+          <div>
+            <span class="eyebrow">Prompt Helper</span>
+            <h2 id="promptHelperTitle">提示词生成</h2>
+          </div>
+          <button id="promptHelperClose" class="ghost-button" type="button">关闭</button>
+        </div>
+
+        <div class="prompt-helper-body">
+          <section class="prompt-helper-controls" aria-label="提示词参数">
+            <div class="prompt-helper-presets" aria-label="提示词预设">
+              <button class="ghost-button" type="button" data-prompt-preset="night-bedroom">图一</button>
+              <button class="ghost-button" type="button" data-prompt-preset="hanfu-bedroom">图二</button>
+              <button class="ghost-button" type="button" data-prompt-preset="window-bedroom">图三</button>
+            </div>
+            <div class="field">
+              <label for="promptStyle">写真风格</label>
+              <select id="promptStyle"></select>
+            </div>
+            <div class="field">
+              <label for="promptScene">场景方向</label>
+              <select id="promptScene"></select>
+            </div>
+            <div class="field">
+              <label for="promptOutfit">服装方向</label>
+              <select id="promptOutfit"></select>
+            </div>
+            <div class="field">
+              <label for="promptTemperament">气质标签</label>
+              <select id="promptTemperament"></select>
+            </div>
+            <div class="field">
+              <label for="promptBody">身形方向</label>
+              <select id="promptBody"></select>
+            </div>
+            <div class="field">
+              <label for="promptLine">线条强调</label>
+              <select id="promptLine"></select>
+            </div>
+            <div class="field">
+              <label for="promptCamera">镜头方向</label>
+              <select id="promptCamera"></select>
+            </div>
+          </section>
+
+          <section class="prompt-helper-output" aria-label="生成提示词">
+            <textarea id="promptHelperOutput" rows="16" spellcheck="false"></textarea>
+            <div class="prompt-helper-actions">
+              <button id="promptRandomize" class="ghost-button" type="button">随机生成</button>
+              <button id="promptCopy" class="ghost-button" type="button">复制文案</button>
+              <button id="promptUse" class="primary-button" type="button">填入 Prompt</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

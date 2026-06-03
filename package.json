@@ -1,0 +1,13 @@
+{
+  "name": "gpt-image-2-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local GPT-Image-2 API console.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
