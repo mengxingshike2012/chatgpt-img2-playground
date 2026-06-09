@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>APIMart 创作控制台</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="app-header">
@@ -38,8 +38,11 @@
 
           <div class="field">
             <label for="prompt">Prompt</label>
-            <textarea id="prompt" rows="7" required placeholder="一只橘猫坐在窗台上看夕阳，水彩画风格"></textarea>
-            <button id="promptHelperOpen" class="ghost-button prompt-helper-trigger" type="button">提示词生成</button>
+            <textarea id="prompt" rows="14" required placeholder="输入或生成用于图片生成的 Prompt"></textarea>
+            <div class="prompt-helper-entry">
+              <button id="promptHelperOpen" class="ghost-button prompt-helper-trigger" type="button">提示词生成</button>
+              <button id="promptHelperXiaOpen" class="ghost-button prompt-helper-trigger" type="button">提示词生成-夏清风</button>
+            </div>
           </div>
 
           <div class="inline-grid">
@@ -61,12 +64,12 @@
             </div>
           </div>
 
-          <div class="field switch-row">
+          <div class="field switch-row" hidden>
             <label for="officialFallback">官方渠道兜底</label>
             <input id="officialFallback" type="checkbox" />
           </div>
 
-          <div class="field">
+          <div class="field" hidden>
             <label for="imageUrls">参考图 URL</label>
             <textarea id="imageUrls" rows="3" placeholder="每行一个公网图片 URL，最多 16 张"></textarea>
           </div>
@@ -190,11 +193,7 @@
 
           <div class="field">
             <label for="videoPrompt">Prompt</label>
-            <textarea
-              id="videoPrompt"
-              rows="5"
-              placeholder="让人物在城市街道自然行走，镜头缓慢推进，电影感光影"
-            ></textarea>
+            <textarea id="videoPrompt" rows="5" placeholder="让人物在城市街道自然行走，镜头缓慢推进，电影感光影"></textarea>
           </div>
 
           <div class="video-options">
@@ -205,6 +204,7 @@
                 <option value="doubao-seedance-2.0-fast">Seedance 2.0 Fast</option>
                 <option value="doubao-seedance-2.0-face">Seedance 2.0 Face</option>
                 <option value="doubao-seedance-2.0-fast-face">Seedance 2.0 Fast Face</option>
+                <option value="grok-imagine-1.5-video-apimart">Grok Imagine 1.5</option>
               </select>
             </div>
             <div class="field">
@@ -213,6 +213,8 @@
                 <option value="16:9">16:9 横屏</option>
                 <option value="9:16">9:16 竖屏</option>
                 <option value="1:1">1:1 正方</option>
+                <option value="3:2">3:2 横屏</option>
+                <option value="2:3">2:3 竖屏</option>
                 <option value="4:3">4:3</option>
                 <option value="3:4">3:4</option>
                 <option value="21:9">21:9 超宽</option>
@@ -373,6 +375,6 @@
       </div>
     </div>
 
-    <script src="./app.js" type="module"></script>
+    <script src="/app.js" type="module"></script>
   </body>
 </html>

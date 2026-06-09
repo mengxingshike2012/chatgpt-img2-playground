@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const imagesDir = path.join(__dirname, "images");
+const videosDir = path.join(__dirname, "videos");
 const apiBase = "https://api.apimart.ai";
 const port = Number(globalThis.process?.env?.PORT || 3000);
 
@@ -19,7 +20,10 @@ const mimeTypes = new Map([
   [".jpg", "image/jpeg"],
   [".jpeg", "image/jpeg"],
   [".svg", "image/svg+xml"],
-  [".webp", "image/webp"]
+  [".webp", "image/webp"],
+  [".mp4", "video/mp4"],
+  [".mov", "video/quicktime"],
+  [".webm", "video/webm"]
 ]);
 
 function sendText(response, statusCode, text) {
@@ -96,12 +100,15 @@ function safeName(value, fallback = "image") {
     .slice(0, 80) || fallback;
 }
 
-function extensionFromResponse(url, contentType) {
+function extensionFromResponse(url, contentType, fallback = ".png") {
   const byType = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
-    "image/gif": ".gif"
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm"
   };
   const type = String(contentType || "").split(";")[0].toLowerCase();
   if (byType[type]) return byType[type];
@@ -112,38 +119,82 @@ function extensionFromResponse(url, contentType) {
   } catch {
     // Fall through to a conservative default.
   }
-  return ".png";
+  return fallback;
 }
 
 function collectTaskImageUrls(task) {
   return (task?.result?.images || []).flatMap((item) => item?.url || []);
 }
 
-async function downloadImages(taskId, images) {
-  await mkdir(imagesDir, { recursive: true });
+function collectTaskVideoUrls(task) {
+  const videos = (task?.result?.videos || []).flatMap((item) => {
+    if (typeof item === "string") return item;
+    return item?.url || [];
+  });
+  const visit = (value) => {
+    if (!value) return;
+    if (typeof value === "string") {
+      if (/^https?:\/\//i.test(value) && /\.(mp4|mov|webm)(\?|$)/i.test(value)) {
+        videos.push(value);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value === "object") {
+      Object.values(value).forEach(visit);
+    }
+  };
+
+  visit(task?.result);
+  return [...new Set(videos)];
+}
+
+async function downloadFiles(taskId, urls, { directory, urlPrefix, label, fallbackName }) {
+  await mkdir(directory, { recursive: true });
   const safeTaskId = safeName(taskId, "task");
   const saved = [];
 
-  for (const [index, imageUrl] of images.entries()) {
-    const imageResponse = await fetch(imageUrl);
-    if (!imageResponse.ok) {
-      throw new Error(`Failed to download image ${index + 1}: HTTP ${imageResponse.status}`);
+  for (const [index, fileUrl] of urls.entries()) {
+    const fileResponse = await fetch(fileUrl);
+    if (!fileResponse.ok) {
+      throw new Error(`Failed to download ${label} ${index + 1}: HTTP ${fileResponse.status}`);
     }
 
-    const bytes = Buffer.from(await imageResponse.arrayBuffer());
-    const ext = extensionFromResponse(imageUrl, imageResponse.headers.get("content-type"));
+    const bytes = Buffer.from(await fileResponse.arrayBuffer());
+    const ext = extensionFromResponse(fileUrl, fileResponse.headers.get("content-type"), fallbackName);
     const filename = `${safeTaskId}-${String(index + 1).padStart(2, "0")}${ext}`;
-    await writeFile(path.join(imagesDir, filename), bytes);
+    await writeFile(path.join(directory, filename), bytes);
     saved.push({
-      original_url: imageUrl,
+      original_url: fileUrl,
       filename,
-      url: `/images/${encodeURIComponent(filename)}`,
+      url: `${urlPrefix}/${encodeURIComponent(filename)}`,
       size: bytes.length
     });
-    console.log(`Saved generated image: images/${filename}`);
+    console.log(`Saved generated ${label}: ${urlPrefix.slice(1)}/${filename}`);
   }
 
   return saved;
+}
+
+async function downloadImages(taskId, images) {
+  return downloadFiles(taskId, images, {
+    directory: imagesDir,
+    urlPrefix: "/images",
+    label: "image",
+    fallbackName: ".png"
+  });
+}
+
+async function downloadVideos(taskId, videos) {
+  return downloadFiles(taskId, videos, {
+    directory: videosDir,
+    urlPrefix: "/videos",
+    label: "video",
+    fallbackName: ".mp4"
+  });
 }
 
 async function saveGeneratedImages(request, response) {
@@ -161,6 +212,24 @@ async function saveGeneratedImages(request, response) {
   } catch (error) {
     console.error(error?.message || "Failed to save images");
     sendJson(response, 500, { error: error?.message || "Failed to save images" });
+  }
+}
+
+async function saveGeneratedVideos(request, response) {
+  try {
+    const payload = await readRequestJson(request);
+    const videos = Array.isArray(payload.videos) ? payload.videos.filter(Boolean) : [];
+    console.log(`Video save requested: task=${payload.task_id || "unknown"}, count=${videos.length}`);
+    if (!videos.length) {
+      sendJson(response, 400, { error: "videos must be a non-empty array" });
+      return;
+    }
+
+    const saved = await downloadVideos(payload.task_id, videos);
+    sendJson(response, 200, { videos: saved });
+  } catch (error) {
+    console.error(error?.message || "Failed to save videos");
+    sendJson(response, 500, { error: error?.message || "Failed to save videos" });
   }
 }
 
@@ -185,6 +254,7 @@ async function proxyTaskQuery(request, response, taskId) {
 
     const task = payload.data || {};
     const images = collectTaskImageUrls(task);
+    const videos = collectTaskVideoUrls(task);
     if (task.status === "completed" && images.length) {
       console.log(`Completed task queried: ${task.id || taskId}; saving ${images.length} image(s)`);
       try {
@@ -198,6 +268,17 @@ async function proxyTaskQuery(request, response, taskId) {
         const message = error?.message || "Failed to save images locally";
         console.error(`Failed to save completed task ${task.id || taskId}: ${message}`);
         task.local_save_error = message;
+      }
+    }
+    if (task.status === "completed" && videos.length) {
+      console.log(`Completed video task queried: ${task.id || taskId}; saving ${videos.length} video(s)`);
+      try {
+        const saved = await downloadVideos(task.id || taskId, videos);
+        task.local_videos = saved.map((item) => item.url);
+      } catch (error) {
+        const message = error?.message || "Failed to save videos locally";
+        console.error(`Failed to save completed video task ${task.id || taskId}: ${message}`);
+        task.local_video_save_error = message;
       }
     }
 
@@ -225,6 +306,23 @@ async function listSavedImages(response) {
   }
 }
 
+async function listSavedVideos(response) {
+  try {
+    await mkdir(videosDir, { recursive: true });
+    const entries = await readdir(videosDir, { withFileTypes: true });
+    const videos = entries
+      .filter((entry) => entry.isFile() && [".mp4", ".mov", ".webm"].includes(path.extname(entry.name).toLowerCase()))
+      .map((entry) => ({
+        filename: entry.name,
+        url: `/videos/${encodeURIComponent(entry.name)}`
+      }))
+      .sort((a, b) => b.filename.localeCompare(a.filename));
+    sendJson(response, 200, { videos });
+  } catch (error) {
+    sendJson(response, 500, { error: error?.message || "Failed to list videos" });
+  }
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 
@@ -233,8 +331,18 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/videos/save") {
+    await saveGeneratedVideos(request, response);
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/images") {
     await listSavedImages(response);
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/videos") {
+    await listSavedVideos(response);
     return;
   }
 
@@ -251,6 +359,11 @@ const server = createServer(async (request, response) => {
 
   if (url.pathname.startsWith("/images/")) {
     await serveStatic(response, url, imagesDir, "/images");
+    return;
+  }
+
+  if (url.pathname.startsWith("/videos/")) {
+    await serveStatic(response, url, videosDir, "/videos");
     return;
   }
 

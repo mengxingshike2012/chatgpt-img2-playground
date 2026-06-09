@@ -184,6 +184,7 @@ const expiresAt = document.querySelector("#expiresAt");
 const responseJson = document.querySelector("#responseJson");
 const copyJson = document.querySelector("#copyJson");
 const promptHelperOpen = document.querySelector("#promptHelperOpen");
+const promptHelperXiaOpen = document.querySelector("#promptHelperXiaOpen");
 const promptHelperModal = document.querySelector("#promptHelperModal");
 const promptHelperClose = document.querySelector("#promptHelperClose");
 const promptHelperOutput = document.querySelector("#promptHelperOutput");
@@ -258,6 +259,7 @@ let latestSubmission = null;
 let previewImages = [];
 let previewIndex = 0;
 const localImageSaves = new Map();
+const localVideoSaves = new Map();
 const selectedReferenceFiles = [];
 
 const savedSettings = readJson(settingsKey, {});
@@ -337,6 +339,10 @@ function openPromptHelper() {
   } else {
     updatePromptHelperOutput();
   }
+}
+
+function openXiaPromptHelper() {
+  openPromptHelper();
 }
 
 function closePromptHelper() {
@@ -759,6 +765,30 @@ async function postImageSaveRequest(taskId, images) {
   return readResponse(response);
 }
 
+async function saveVideosLocally(taskId, videos) {
+  if (!taskId || !videos.length) return videos;
+
+  if (!localVideoSaves.has(taskId)) {
+    localVideoSaves.set(
+      taskId,
+      postVideoSaveRequest(taskId, videos)
+        .finally(() => localVideoSaves.delete(taskId))
+    );
+  }
+
+  return localVideoSaves.get(taskId);
+}
+
+async function postVideoSaveRequest(taskId, videos) {
+  const response = await fetch("/api/videos/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId, videos })
+  });
+  const payload = await readResponse(response);
+  return payload.videos.map((item) => item.url);
+}
+
 function blobToDataUri(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -786,6 +816,16 @@ function updateStageImageUrls(images) {
   });
 }
 
+function updateStageVideoUrls(videos) {
+  videoStage.querySelectorAll("video").forEach((video, index) => {
+    const url = videos[index];
+    const figure = video.closest("figure");
+    const link = figure?.querySelector("a");
+    if (url) video.src = url;
+    if (url && link) link.href = url;
+  });
+}
+
 function saveCompletedImagesInBackground(task, originalImages, firstExpiry) {
   const taskId = task.id || taskIdInput.value.trim();
   if (!taskId || !originalImages.length || task.local_images?.length) return;
@@ -807,6 +847,29 @@ function saveCompletedImagesInBackground(task, originalImages, firstExpiry) {
     .catch((error) => {
       setProgress(100, "生成完成，本地保存失败");
       setJson({ ...latestJson, local_save_error: error?.message || "Failed to save images locally" });
+    });
+}
+
+function saveCompletedVideosInBackground(task, originalVideos) {
+  const taskId = task.id || videoTaskIdInput.value.trim();
+  if (!taskId || !originalVideos.length || task.local_videos?.length) return;
+
+  setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, "completed", 100, "生成完成，后台保存到 videos/");
+  saveVideosLocally(taskId, originalVideos)
+    .then((localVideos) => {
+      updateStageVideoUrls(localVideos);
+      setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, "completed", 100, `已保存到 videos/ (${localVideos.length} 个)`);
+      setVideoJson({
+        ...latestVideoJson,
+        data: {
+          ...latestVideoJson.data,
+          local_videos: localVideos
+        }
+      });
+    })
+    .catch((error) => {
+      setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, "completed", 100, "生成完成，本地保存失败");
+      setVideoJson({ ...latestVideoJson, local_video_save_error: error?.message || "Failed to save videos locally" });
     });
 }
 
@@ -1099,50 +1162,101 @@ function startVideoPolling(taskId, delay) {
   }, delay);
 }
 
+function syncVideoModelUi() {
+  const isGrokImagine = videoModel.value === "grok-imagine-1.5-video-apimart";
+
+  videoDuration.min = isGrokImagine ? "6" : "5";
+  videoDuration.max = isGrokImagine ? "30" : "15";
+  if (isGrokImagine && Number(videoDuration.value) < 6) videoDuration.value = "6";
+  if (!isGrokImagine && Number(videoDuration.value) > 15) videoDuration.value = "15";
+
+  Array.from(videoResolution.options).forEach((option) => {
+    option.disabled = isGrokImagine && option.value === "1080p";
+  });
+  if (isGrokImagine && videoResolution.value === "1080p") {
+    videoResolution.value = "720p";
+  }
+
+  [
+    videoSeed,
+    videoGenerateAudio,
+    videoReturnLastFrame,
+    videoWebSearch,
+    videoFirstFrame,
+    videoLastFrame,
+    videoUrls,
+    videoAudioUrls
+  ].forEach((element) => {
+    element.disabled = isGrokImagine;
+  });
+}
+
 function buildVideoPayload() {
+  const isGrokImagine = videoModel.value === "grok-imagine-1.5-video-apimart";
   const payload = {
     model: videoModel.value,
     prompt: videoPrompt.value.trim(),
-    resolution: videoResolution.value,
     size: videoSize.value,
-    duration: Number(videoDuration.value) || 5,
-    generate_audio: videoGenerateAudio.checked,
-    return_last_frame: videoReturnLastFrame.checked
+    duration: Number(videoDuration.value) || (isGrokImagine ? 6 : 5)
   };
 
-  const seed = videoSeed.value.trim();
-  if (seed) payload.seed = Number(seed);
-  if (videoWebSearch.checked) payload.tools = [{ type: "web_search" }];
+  if (isGrokImagine) {
+    payload.quality = videoResolution.value === "720p" ? "720p" : "480p";
 
-  const firstFrame = videoFirstFrame.value.trim();
-  const lastFrame = videoLastFrame.value.trim();
-  if (firstFrame || lastFrame) {
-    payload.image_with_roles = [];
-    if (firstFrame) payload.image_with_roles.push({ url: firstFrame, role: "first_frame" });
-    if (lastFrame) payload.image_with_roles.push({ url: lastFrame, role: "last_frame" });
-  } else {
     const images = lineValues(videoImageUrls.value);
     if (images.length) payload.image_urls = images;
-    const videos = lineValues(videoUrls.value);
-    if (videos.length) payload.video_urls = videos;
-    const audios = lineValues(videoAudioUrls.value);
-    if (audios.length) payload.audio_urls = audios;
-  }
 
-  if (payload.image_urls?.length > 9) {
-    throw new Error("参考图最多 9 张。");
-  }
-  if (payload.duration < 5 || payload.duration > 15) {
-    throw new Error("视频时长需在 5 到 15 秒之间。");
-  }
-  if (payload.video_urls?.length > 3) {
-    throw new Error("参考视频最多 3 个。");
-  }
-  if (payload.audio_urls?.length > 3) {
-    throw new Error("参考音频最多 3 个。");
-  }
-  if (payload.resolution === "1080p" && payload.model.includes("fast")) {
-    throw new Error("1080p 仅支持 doubao-seedance-2.0 和 doubao-seedance-2.0-face。");
+    if (payload.size === "adaptive") {
+      throw new Error("Grok Imagine does not support adaptive size. Choose 16:9, 9:16, 1:1, 3:2, or 2:3.");
+    }
+    if (payload.duration < 6 || payload.duration > 30) {
+      throw new Error("Grok Imagine duration must be between 6 and 30 seconds.");
+    }
+    if (payload.image_urls?.length > 7) {
+      throw new Error("Grok Imagine supports up to 7 reference images.");
+    }
+    if (payload.image_urls?.some((url) => !/^https?:\/\//i.test(url))) {
+      throw new Error("Grok Imagine reference images must be public http(s) URLs. base64 and asset:// are not supported.");
+    }
+  } else {
+    payload.resolution = videoResolution.value;
+    payload.generate_audio = videoGenerateAudio.checked;
+    payload.return_last_frame = videoReturnLastFrame.checked;
+
+    const seed = videoSeed.value.trim();
+    if (seed) payload.seed = Number(seed);
+    if (videoWebSearch.checked) payload.tools = [{ type: "web_search" }];
+
+    const firstFrame = videoFirstFrame.value.trim();
+    const lastFrame = videoLastFrame.value.trim();
+    if (firstFrame || lastFrame) {
+      payload.image_with_roles = [];
+      if (firstFrame) payload.image_with_roles.push({ url: firstFrame, role: "first_frame" });
+      if (lastFrame) payload.image_with_roles.push({ url: lastFrame, role: "last_frame" });
+    } else {
+      const images = lineValues(videoImageUrls.value);
+      if (images.length) payload.image_urls = images;
+      const videos = lineValues(videoUrls.value);
+      if (videos.length) payload.video_urls = videos;
+      const audios = lineValues(videoAudioUrls.value);
+      if (audios.length) payload.audio_urls = audios;
+    }
+
+    if (payload.image_urls?.length > 9) {
+      throw new Error("Reference images support up to 9 items.");
+    }
+    if (payload.duration < 5 || payload.duration > 15) {
+      throw new Error("Video duration must be between 5 and 15 seconds.");
+    }
+    if (payload.video_urls?.length > 3) {
+      throw new Error("Reference videos support up to 3 items.");
+    }
+    if (payload.audio_urls?.length > 3) {
+      throw new Error("Reference audio files support up to 3 items.");
+    }
+    if (payload.resolution === "1080p" && payload.model.includes("fast")) {
+      throw new Error("1080p is only supported by doubao-seedance-2.0 and doubao-seedance-2.0-face.");
+    }
   }
 
   return payload;
@@ -1209,6 +1323,10 @@ function renderVideoTask(payload) {
   setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, status, progress, status === "completed" ? "生成完成" : `${progress}%`);
 
   const urls = collectUrls(task.result);
+  const originalVideos = urls.video.slice();
+  if (task.local_videos?.length) {
+    urls.video = task.local_videos;
+  }
   if (status === "failed") {
     videoStage.innerHTML = `<span>${task.error?.message || "视频任务失败"}</span>`;
     return;
@@ -1247,10 +1365,21 @@ function renderVideoTask(payload) {
     figure.append(img, link);
     videoStage.append(figure);
   });
+
+  if (status === "completed") {
+    saveCompletedVideosInBackground(task, originalVideos);
+  }
 }
 
 function collectUrls(result) {
-  const found = { video: [], image: [], other: [] };
+  const found = {
+    video: (result?.videos || []).flatMap((item) => {
+      if (typeof item === "string") return item;
+      return item?.url || [];
+    }),
+    image: [],
+    other: []
+  };
   const visit = (value) => {
     if (!value) return;
     if (typeof value === "string") {
@@ -1318,6 +1447,7 @@ fileList.addEventListener("click", (event) => {
   element.addEventListener("input", saveSettings);
   element.addEventListener("change", saveSettings);
 });
+videoModel.addEventListener("change", syncVideoModelUi);
 [videoGenerateAudio, videoReturnLastFrame, videoWebSearch].forEach((element) => {
   element.addEventListener("change", saveSettings);
 });
@@ -1347,6 +1477,7 @@ copyJson.addEventListener("click", async () => {
 });
 
 promptHelperOpen.addEventListener("click", openPromptHelper);
+promptHelperXiaOpen?.addEventListener("click", openXiaPromptHelper);
 promptHelperClose.addEventListener("click", closePromptHelper);
 promptHelperModal.addEventListener("click", (event) => {
   const target = event.target;
@@ -1485,6 +1616,7 @@ setVideoJson({});
 renderFileList();
 renderHistory();
 updatePixelReadout();
+syncVideoModelUi();
 setView(location.hash === "#video" ? "video" : location.hash === "#history" ? "history" : "generator", {
   updateHash: false
 });
