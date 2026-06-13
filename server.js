@@ -1,12 +1,15 @@
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const imagesDir = path.join(__dirname, "images");
+const uploadsDir = path.join(__dirname, "uploads");
+const uploadsIndexPath = path.join(uploadsDir, "index.json");
 const videosDir = path.join(__dirname, "videos");
 const apiBase = "https://api.apimart.ai";
 const port = Number(globalThis.process?.env?.PORT || 3000);
@@ -21,6 +24,7 @@ const mimeTypes = new Map([
   [".jpeg", "image/jpeg"],
   [".svg", "image/svg+xml"],
   [".webp", "image/webp"],
+  [".gif", "image/gif"],
   [".mp4", "video/mp4"],
   [".mov", "video/quicktime"],
   [".webm", "video/webm"]
@@ -120,6 +124,75 @@ function extensionFromResponse(url, contentType, fallback = ".png") {
     // Fall through to a conservative default.
   }
   return fallback;
+}
+
+function extensionFromMimeType(contentType, fallback = ".png") {
+  const type = String(contentType || "").split(";")[0].toLowerCase();
+  const byType = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg"
+  };
+  return byType[type] || fallback;
+}
+
+function parseDataUri(value) {
+  const match = String(value || "").match(/^data:([^;,]+)(;base64)?,(.*)$/);
+  if (!match) {
+    throw new Error("Invalid image data");
+  }
+
+  const mimeType = match[1].toLowerCase();
+  if (!mimeType.startsWith("image/")) {
+    throw new Error("Only image uploads are supported");
+  }
+
+  const data = match[3] || "";
+  const bytes = match[2] ? Buffer.from(data, "base64") : Buffer.from(decodeURIComponent(data), "utf8");
+  if (!bytes.length) {
+    throw new Error("Uploaded image is empty");
+  }
+  if (bytes.length > 20 * 1024 * 1024) {
+    throw new Error("Uploaded image must be 20 MB or smaller");
+  }
+
+  return { bytes, mimeType };
+}
+
+async function uploadImageToApimart({ bytes, mimeType, filename, authorization }) {
+  const form = new FormData();
+  form.append("file", new Blob([bytes], { type: mimeType }), filename);
+
+  const upstream = await fetch(`${apiBase}/v1/uploads/images`, {
+    method: "POST",
+    headers: { Authorization: authorization },
+    body: form
+  });
+  const payload = await upstream.json().catch(() => ({}));
+  if (!upstream.ok || payload.error) {
+    throw new Error(payload?.error?.message || payload?.message || `APIMart upload failed: HTTP ${upstream.status}`);
+  }
+  if (!payload.url) {
+    throw new Error("APIMart upload response did not include url");
+  }
+
+  return payload;
+}
+
+async function readUploadsIndex() {
+  try {
+    const records = JSON.parse(await readFile(uploadsIndexPath, "utf8"));
+    return Array.isArray(records) ? records : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeUploadsIndex(records) {
+  await mkdir(uploadsDir, { recursive: true });
+  await writeFile(uploadsIndexPath, JSON.stringify(records.slice(0, 500), null, 2));
 }
 
 function collectTaskImageUrls(task) {
@@ -306,6 +379,99 @@ async function listSavedImages(response) {
   }
 }
 
+async function uploadImages(request, response) {
+  try {
+    const authorization = request.headers.authorization;
+    if (!authorization) {
+      sendJson(response, 401, { error: { message: "Missing Authorization header" } });
+      return;
+    }
+
+    const payload = await readRequestJson(request);
+    const images = Array.isArray(payload.images) ? payload.images : [];
+    if (!images.length) {
+      sendJson(response, 400, { error: "images must be a non-empty array" });
+      return;
+    }
+
+    await mkdir(uploadsDir, { recursive: true });
+    const saved = [];
+    const now = Date.now();
+
+    for (const [index, item] of images.entries()) {
+      const { bytes, mimeType } = parseDataUri(item?.data);
+      const ext = extensionFromMimeType(item?.type || mimeType, path.extname(item?.name || "") || ".png");
+      if (!mimeTypes.has(ext.toLowerCase()) || !mimeTypes.get(ext.toLowerCase())?.startsWith("image/")) {
+        throw new Error("Unsupported image type");
+      }
+
+      const baseName = safeName(path.basename(item?.name || `upload-${index + 1}`, path.extname(item?.name || "")), "upload");
+      const filename = `${now}-${String(index + 1).padStart(2, "0")}-${randomUUID().slice(0, 8)}-${baseName}${ext}`;
+      await writeFile(path.join(uploadsDir, filename), bytes);
+      const upstream = await uploadImageToApimart({
+        bytes,
+        mimeType,
+        filename: item?.name || filename,
+        authorization
+      });
+      saved.push({
+        filename,
+        original_name: item?.name || filename,
+        type: mimeType,
+        size: bytes.length,
+        uploaded_at: now,
+        url: upstream.url,
+        api_url: upstream.url,
+        local_url: `/uploads/${encodeURIComponent(filename)}`,
+        expires_at: upstream.expires_at || null
+      });
+    }
+
+    const history = await readUploadsIndex();
+    await writeUploadsIndex([...saved, ...history]);
+    sendJson(response, 200, { images: saved });
+  } catch (error) {
+    console.error(error?.message || "Failed to upload images");
+    sendJson(response, 500, { error: error?.message || "Failed to upload images" });
+  }
+}
+
+async function listUploadedImages(response) {
+  try {
+    await mkdir(uploadsDir, { recursive: true });
+    const indexed = await readUploadsIndex();
+    if (indexed.length) {
+      sendJson(response, 200, { images: indexed });
+      return;
+    }
+
+    const entries = await readdir(uploadsDir, { withFileTypes: true });
+    const images = await Promise.all(
+      entries
+        .filter((entry) => {
+          const ext = path.extname(entry.name).toLowerCase();
+          return entry.isFile() && mimeTypes.has(ext) && mimeTypes.get(ext)?.startsWith("image/");
+        })
+        .map(async (entry) => {
+          const filePath = path.join(uploadsDir, entry.name);
+          const fileStat = await stat(filePath);
+          return {
+            filename: entry.name,
+            original_name: entry.name.replace(/^\d+-\d+-[a-f0-9]+-/i, ""),
+            size: fileStat.size,
+            uploaded_at: fileStat.mtimeMs,
+            url: `/uploads/${encodeURIComponent(entry.name)}`,
+            local_url: `/uploads/${encodeURIComponent(entry.name)}`
+          };
+        })
+    );
+    images.sort((a, b) => b.uploaded_at - a.uploaded_at);
+    sendJson(response, 200, { images });
+  } catch (error) {
+    sendJson(response, 500, { error: error?.message || "Failed to list uploads" });
+  }
+}
+
 async function listSavedVideos(response) {
   try {
     await mkdir(videosDir, { recursive: true });
@@ -336,8 +502,18 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/uploads") {
+    await uploadImages(request, response);
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/images") {
     await listSavedImages(response);
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/uploads") {
+    await listUploadedImages(response);
     return;
   }
 
@@ -359,6 +535,11 @@ const server = createServer(async (request, response) => {
 
   if (url.pathname.startsWith("/images/")) {
     await serveStatic(response, url, imagesDir, "/images");
+    return;
+  }
+
+  if (url.pathname.startsWith("/uploads/")) {
+    await serveStatic(response, url, uploadsDir, "/uploads");
     return;
   }
 

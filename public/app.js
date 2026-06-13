@@ -1,5 +1,6 @@
 const settingsKey = "gpt-image-2-settings";
 const historyKey = "gpt-image-2-history";
+const uploadHistoryKey = "gpt-image-2-upload-history";
 const apiBase = "https://api.apimart.ai";
 const maxReferenceImages = 16;
 
@@ -200,9 +201,11 @@ const promptCopy = document.querySelector("#promptCopy");
 const promptUse = document.querySelector("#promptUse");
 const generatorTab = document.querySelector("#generatorTab");
 const historyTab = document.querySelector("#historyTab");
+const uploadTab = document.querySelector("#uploadTab");
 const videoTab = document.querySelector("#videoTab");
 const generatorView = document.querySelector("#generatorView");
 const historyView = document.querySelector("#historyView");
+const uploadView = document.querySelector("#uploadView");
 const videoView = document.querySelector("#videoView");
 const historySearch = document.querySelector("#historySearch");
 const clearHistory = document.querySelector("#clearHistory");
@@ -220,6 +223,15 @@ const previewOpen = document.querySelector("#previewOpen");
 const previewClose = document.querySelector("#previewClose");
 const previewStage = document.querySelector("#previewStage");
 const previewImage = document.querySelector("#previewImage");
+const uploadDropZone = document.querySelector("#uploadDropZone");
+const uploadInput = document.querySelector("#uploadInput");
+const chooseUploadFiles = document.querySelector("#chooseUploadFiles");
+const refreshUploads = document.querySelector("#refreshUploads");
+const uploadStatus = document.querySelector("#uploadStatus");
+const uploadCount = document.querySelector("#uploadCount");
+const uploadSearch = document.querySelector("#uploadSearch");
+const uploadEmpty = document.querySelector("#uploadEmpty");
+const uploadGrid = document.querySelector("#uploadGrid");
 const videoForm = document.querySelector("#videoForm");
 const videoApiKey = document.querySelector("#videoApiKey");
 const videoPrompt = document.querySelector("#videoPrompt");
@@ -258,6 +270,7 @@ let latestVideoJson = {};
 let latestSubmission = null;
 let previewImages = [];
 let previewIndex = 0;
+let uploadedImages = [];
 const localImageSaves = new Map();
 const localVideoSaves = new Map();
 const selectedReferenceFiles = [];
@@ -364,6 +377,7 @@ videoApiKey.value = savedSettings.api_key || "";
 promptInput.value = savedSettings.prompt || "";
 officialFallback.checked = Boolean(savedSettings.official_fallback);
 imageUrls.value = savedSettings.image_urls || "";
+taskIdInput.value = savedSettings.task_id || "";
 videoPrompt.value = savedSettings.video_prompt || "";
 videoModel.value = savedSettings.video_model || "doubao-seedance-2.0";
 videoSize.value = savedSettings.video_size || "16:9";
@@ -374,6 +388,7 @@ videoFirstFrame.value = savedSettings.video_first_frame || "";
 videoLastFrame.value = savedSettings.video_last_frame || "";
 videoUrls.value = savedSettings.video_urls || "";
 videoAudioUrls.value = savedSettings.video_audio_urls || "";
+videoTaskIdInput.value = savedSettings.video_task_id || "";
 videoGenerateAudio.checked = Boolean(savedSettings.video_generate_audio);
 videoReturnLastFrame.checked = Boolean(savedSettings.video_return_last_frame);
 videoWebSearch.checked = Boolean(savedSettings.video_web_search);
@@ -397,6 +412,7 @@ function saveSettings() {
       resolution: resolutionSelect.value,
       official_fallback: officialFallback.checked,
       image_urls: imageUrls.value,
+      task_id: taskIdInput.value.trim(),
       video_prompt: videoPrompt.value,
       video_model: videoModel.value,
       video_size: videoSize.value,
@@ -407,6 +423,7 @@ function saveSettings() {
       video_last_frame: videoLastFrame.value,
       video_urls: videoUrls.value,
       video_audio_urls: videoAudioUrls.value,
+      video_task_id: videoTaskIdInput.value.trim(),
       video_generate_audio: videoGenerateAudio.checked,
       video_return_last_frame: videoReturnLastFrame.checked,
       video_web_search: videoWebSearch.checked
@@ -425,18 +442,24 @@ function writeHistory(history) {
 
 function setView(view, { updateHash = true } = {}) {
   const showHistory = view === "history";
+  const showUpload = view === "upload";
   const showVideo = view === "video";
-  generatorView.hidden = showHistory || showVideo;
+  generatorView.hidden = showHistory || showUpload || showVideo;
   historyView.hidden = !showHistory;
+  uploadView.hidden = !showUpload;
   videoView.hidden = !showVideo;
-  generatorTab.classList.toggle("active", !showHistory && !showVideo);
+  generatorTab.classList.toggle("active", !showHistory && !showUpload && !showVideo);
   historyTab.classList.toggle("active", showHistory);
+  uploadTab.classList.toggle("active", showUpload);
   videoTab.classList.toggle("active", showVideo);
   if (updateHash) {
-    history.replaceState(null, "", showVideo ? "#video" : showHistory ? "#history" : "#generate");
+    history.replaceState(null, "", showVideo ? "#video" : showUpload ? "#upload" : showHistory ? "#history" : "#generate");
   }
   if (showHistory) {
     renderHistory();
+  }
+  if (showUpload) {
+    loadUploads();
   }
 }
 
@@ -603,6 +626,139 @@ function removeReferenceFile(index) {
   renderFileList();
 }
 
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function setUploadStatus(text) {
+  uploadStatus.textContent = text;
+}
+
+function readUploadHistory() {
+  const history = readJson(uploadHistoryKey, []);
+  return Array.isArray(history) ? history : [];
+}
+
+function writeUploadHistory(history) {
+  localStorage.setItem(uploadHistoryKey, JSON.stringify(history.slice(0, 500)));
+}
+
+async function uploadImageToApiMart(file) {
+  const form = new FormData();
+  form.append("file", file, file.name || "upload.png");
+
+  const response = await fetch(`${apiBase}/v1/uploads/images`, {
+    method: "POST",
+    headers: {
+      Authorization: authHeaders().Authorization
+    },
+    body: form
+  });
+  const data = await readResponse(response);
+  if (!data.url) {
+    throw new Error("上传成功但 APIMart 响应中没有 url。");
+  }
+
+  return {
+    filename: file.name || "upload.png",
+    original_name: file.name || "upload.png",
+    type: file.type,
+    size: file.size,
+    uploaded_at: Date.now(),
+    url: data.url,
+    api_url: data.url,
+    expires_at: data.expires_at || null
+  };
+}
+
+async function uploadImageFiles(files) {
+  const images = files.filter((file) => file.type.startsWith("image/"));
+  if (!images.length) {
+    setUploadStatus("没有可上传的图片");
+    return;
+  }
+
+  setUploadStatus(`正在上传 ${images.length} 张图片...`);
+  chooseUploadFiles.disabled = true;
+  refreshUploads.disabled = true;
+
+  try {
+    const saved = [];
+    for (const [index, file] of images.entries()) {
+      setUploadStatus(`正在上传 ${index + 1} / ${images.length} 张图片...`);
+      saved.push(await uploadImageToApiMart(file));
+    }
+
+    writeUploadHistory([...saved, ...readUploadHistory()]);
+    loadUploads();
+    setUploadStatus(`已上传 ${saved.length} 张图片`);
+  } catch (error) {
+    setUploadStatus(error?.message || "上传失败");
+  } finally {
+    chooseUploadFiles.disabled = false;
+    refreshUploads.disabled = false;
+    uploadInput.value = "";
+  }
+}
+
+function loadUploads() {
+  uploadedImages = readUploadHistory();
+  renderUploads();
+  setUploadStatus(uploadedImages.length ? "记录已刷新" : "等待上传");
+}
+
+function renderUploads() {
+  const term = uploadSearch.value.trim().toLowerCase();
+  const filtered = uploadedImages.filter((item) => {
+    if (!term) return true;
+    return `${item.filename} ${item.original_name || ""}`.toLowerCase().includes(term);
+  });
+
+  uploadCount.textContent = `${uploadedImages.length} 张图片`;
+  uploadGrid.innerHTML = "";
+  uploadEmpty.hidden = filtered.length > 0;
+
+  filtered.forEach((item, index) => {
+    const card = document.createElement("article");
+    const img = document.createElement("img");
+    const body = document.createElement("div");
+    const title = document.createElement("strong");
+    const meta = document.createElement("span");
+    const actions = document.createElement("div");
+    const openLink = document.createElement("a");
+    const copyButton = document.createElement("button");
+
+    card.className = "upload-card";
+    body.className = "upload-card-body";
+    actions.className = "upload-card-actions";
+    const apiUrl = item.api_url || item.url;
+    img.src = apiUrl;
+    img.alt = item.original_name || item.filename;
+    img.dataset.uploadIndex = String(uploadedImages.findIndex((image) => image.filename === item.filename));
+    title.textContent = item.original_name || item.filename;
+    meta.textContent = `${formatBytes(item.size)} · ${formatDateTime(item.uploaded_at)}`;
+
+    openLink.className = "ghost-button";
+    openLink.href = apiUrl;
+    openLink.target = "_blank";
+    openLink.rel = "noreferrer";
+    openLink.textContent = "打开原图";
+
+    copyButton.className = "ghost-button";
+    copyButton.type = "button";
+    copyButton.dataset.copyUploadUrl = apiUrl;
+    copyButton.textContent = "复制链接";
+
+    actions.append(openLink, copyButton);
+    body.append(title, meta, actions);
+    card.append(img, body);
+    uploadGrid.append(card);
+  });
+}
+
 async function readResponse(response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload.error) {
@@ -677,6 +833,7 @@ async function submitGeneration(event) {
 
     latestSubmission.task_id = taskId;
     taskIdInput.value = taskId;
+    saveSettings();
     taskTitle.textContent = taskId;
     setStatus("submitted", "Submitted");
     setProgress(12, "已提交，10 秒后开始轮询");
@@ -1236,10 +1393,6 @@ function buildVideoPayload() {
     } else {
       const images = lineValues(videoImageUrls.value);
       if (images.length) payload.image_urls = images;
-      const videos = lineValues(videoUrls.value);
-      if (videos.length) payload.video_urls = videos;
-      const audios = lineValues(videoAudioUrls.value);
-      if (audios.length) payload.audio_urls = audios;
     }
 
     if (payload.image_urls?.length > 9) {
@@ -1247,12 +1400,6 @@ function buildVideoPayload() {
     }
     if (payload.duration < 5 || payload.duration > 15) {
       throw new Error("Video duration must be between 5 and 15 seconds.");
-    }
-    if (payload.video_urls?.length > 3) {
-      throw new Error("Reference videos support up to 3 items.");
-    }
-    if (payload.audio_urls?.length > 3) {
-      throw new Error("Reference audio files support up to 3 items.");
     }
     if (payload.resolution === "1080p" && payload.model.includes("fast")) {
       throw new Error("1080p is only supported by doubao-seedance-2.0 and doubao-seedance-2.0-face.");
@@ -1282,6 +1429,7 @@ async function submitVideo(event) {
     const taskId = data?.data?.[0]?.task_id || data?.data?.id || data?.data?.task_id;
     if (!taskId) throw new Error("提交成功但响应中没有 task_id。");
     videoTaskIdInput.value = taskId;
+    saveSettings();
     setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, "submitted", 12, "已提交，10 秒后开始轮询");
     startVideoPolling(taskId, 10000);
   } catch (error) {
@@ -1423,6 +1571,7 @@ imageUrls.addEventListener("input", () => {
   saveSettings();
   updatePixelReadout();
 });
+taskIdInput.addEventListener("input", saveSettings);
 imageFiles.addEventListener("change", () => addReferenceFiles(Array.from(imageFiles.files)));
 fileList.addEventListener("click", (event) => {
   const target = event.target;
@@ -1447,6 +1596,7 @@ fileList.addEventListener("click", (event) => {
   element.addEventListener("input", saveSettings);
   element.addEventListener("change", saveSettings);
 });
+videoTaskIdInput.addEventListener("input", saveSettings);
 videoModel.addEventListener("change", syncVideoModelUi);
 [videoGenerateAudio, videoReturnLastFrame, videoWebSearch].forEach((element) => {
   element.addEventListener("change", saveSettings);
@@ -1461,6 +1611,7 @@ toggleKey.addEventListener("click", () => {
 queryButton.addEventListener("click", () => {
   const taskId = taskIdInput.value.trim();
   if (!taskId) return;
+  saveSettings();
   resetResult();
   latestSubmission = null;
   setStatus("processing", "Querying");
@@ -1503,9 +1654,10 @@ promptUse.addEventListener("click", () => {
 
 generatorTab.addEventListener("click", () => setView("generator"));
 historyTab.addEventListener("click", () => setView("history"));
+uploadTab.addEventListener("click", () => setView("upload"));
 videoTab.addEventListener("click", () => setView("video"));
 window.addEventListener("hashchange", () => {
-  setView(location.hash === "#video" ? "video" : location.hash === "#history" ? "history" : "generator", {
+  setView(location.hash === "#video" ? "video" : location.hash === "#upload" ? "upload" : location.hash === "#history" ? "history" : "generator", {
     updateHash: false
   });
 });
@@ -1558,9 +1710,71 @@ historyGrid.addEventListener("click", async (event) => {
   }
 });
 
+chooseUploadFiles.addEventListener("click", () => uploadInput.click());
+uploadDropZone.addEventListener("click", (event) => {
+  if (event.target === chooseUploadFiles) return;
+  uploadInput.click();
+});
+uploadDropZone.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    uploadInput.click();
+  }
+});
+uploadInput.addEventListener("change", () => uploadImageFiles(Array.from(uploadInput.files)));
+refreshUploads.addEventListener("click", loadUploads);
+uploadSearch.addEventListener("input", renderUploads);
+
+["dragenter", "dragover"].forEach((type) => {
+  uploadDropZone.addEventListener(type, (event) => {
+    event.preventDefault();
+    uploadDropZone.classList.add("drag-over");
+  });
+});
+
+["dragleave", "drop"].forEach((type) => {
+  uploadDropZone.addEventListener(type, (event) => {
+    event.preventDefault();
+    uploadDropZone.classList.remove("drag-over");
+  });
+});
+
+uploadDropZone.addEventListener("drop", (event) => {
+  uploadImageFiles(Array.from(event.dataTransfer?.files || []));
+});
+
+document.addEventListener("paste", (event) => {
+  if (uploadView.hidden) return;
+  const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+  if (!files.length) return;
+  event.preventDefault();
+  uploadImageFiles(files);
+});
+
+uploadGrid.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  if (target instanceof HTMLImageElement) {
+    const images = uploadedImages.map((item) => item.api_url || item.url);
+    openPreview(images, Number(target.dataset.uploadIndex) || 0, "上传图片预览");
+    return;
+  }
+
+  const copyUrl = target.dataset.copyUploadUrl;
+  if (copyUrl) {
+    await navigator.clipboard.writeText(copyUrl);
+    target.textContent = "已复制";
+    window.setTimeout(() => {
+      target.textContent = "复制链接";
+    }, 1200);
+  }
+});
+
 videoQueryButton.addEventListener("click", () => {
   const taskId = videoTaskIdInput.value.trim();
   if (!taskId) return;
+  saveSettings();
   clearVideoTimers();
   videoPollCountdown.textContent = "正在查询";
   setTaskUi(videoStatusPill, videoProgressBar, videoProgressText, "processing", 20, "查询中");
@@ -1615,8 +1829,9 @@ setJson({});
 setVideoJson({});
 renderFileList();
 renderHistory();
+loadUploads();
 updatePixelReadout();
 syncVideoModelUi();
-setView(location.hash === "#video" ? "video" : location.hash === "#history" ? "history" : "generator", {
+setView(location.hash === "#video" ? "video" : location.hash === "#upload" ? "upload" : location.hash === "#history" ? "history" : "generator", {
   updateHash: false
 });
